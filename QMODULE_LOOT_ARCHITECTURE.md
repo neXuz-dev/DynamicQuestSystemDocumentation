@@ -617,5 +617,127 @@ Dans `QPoliceSubsystem.cpp` : un `static int32 HeavyDroneToggle` local de foncti
 (:4850 `/Game/Characters/AI/AI_DronePolice`, :5493 `LavrikPolice`, jamais existants).
 Proposé en tâche séparée.
 
+## 12. Rework du loot de mort des IA (2026-09-05, demande Benja)
+
+Point de départ (retour joueur de Benja) : une vingtaine de policiers, Voss, drones et autonomes
+tués, aucun module, aucune munition, aucune arme, aucun argent ; seuls les Sanglines (parties de
+corps) et le chapeau Voss tombaient. Passe de vérification, puis équilibrage validé par Benja
+(« ok go »), avec trois décisions : pirates et Voss forment UNE faction hors-la-loi (unifiée ici
+au niveau du loot seulement), pas de prime directe par défaut (les primes de kill viendront de
+deux modules IC Labs Industries, chantier séparé), un peu d'argent AU SOL via l'item existant.
+
+### 12.1 Constat mesuré (sondes éditeur, lecture binaire des tables, traces de graphe)
+
+- Chemin réel : `UQCombatComponent` (C++, plugin QCombat, parent du BP `CombatComponent`) appelle
+  `ReceiveAuthorityZeroLifeEffects` (autorité seule) ; le BP enchaîne `OnZeroLife`, **`SpawnDrop`**
+  (un tirage `GetRandomDrop` plus chaque `ItemAlwaysDropped`, chacun via `SpawnActor ItemDroppedReplicator`),
+  puis la récompense au tueur : `AddCoinsToInventory(MoneyReward)`, toast `Lib_Reward`, XP.
+  Défauts CDO : `MoneyReward` 0, `ExperienceReward` 5, `HuntedPointsOnDeath` 10 (police) / 0 (cyborgs).
+- `GetRandomDrop` : d'abord `SelfWearingItemsPossibility` (un item de l'INVENTAIRE de l'IA, donc
+  son arme), sinon Bernoulli par clé de `Item:DropWeight` (probabilité par item, un seul item).
+- Tables branchées avant le rework : Sanglines, infectés, GazSac, SandDigger, volants, super Sangline,
+  Voss (`Voss_LootDA` : argent 0,4 / munitions 0,1 / matière 0,3, chapeau TOUJOURS, arme portée 0,4).
+  `ItemDropLoot = None` (mesuré par spawn) sur `AI_Cyborg` et tous ses enfants (pirates, gardes,
+  `AI_Cyborg_Police`), `BASE_Drone` et les 3 drones police, `BASE_Autonomus` et les autonomes, les 16
+  animaux du roster et `Crocodile_BP`. Tables orphelines : `Pirate_LootDA`, `DefaultLootDA`,
+  `Default_Weapon_LootDA`, `LDA_Money`, `Crocidile_LootDA`.
+- Canal module (section 11) : seuls `AI_DronePolice*` et `AI_AutonomusPolice`, 2 % passif et 0,15 %
+  actif : 20 morts donnent 0,4 module attendu et 67 % de chances de ne rien voir. `AI_Cyborg_Police`
+  (roster planétaire) n'était pas éligible.
+- Items de base : `IS_BaseMoney` donne 10 à 30 crédits ; `IS_BaseAmmo` porte une quantité par type
+  (fusil à pompe 24, SMG 120, fusil 60, pistolet 48, sniper 12).
+
+### 12.2 L0, données (livré, vérifié par spawn, parents intacts au md5)
+
+| Table | Contenu (probabilité par item, un seul tiré) | Branchée sur |
+|---|---|---|
+| `Voss_LootDA` (table hors-la-loi commune) | argent 0,6 ; munitions 0,35 ; matière 0,25 ; bandage 0,15 ; petite trousse 0,05 ; **chapeau 0,20** (était « toujours ») ; arme portée 0,12 (était 0,4) | 4 `AI_Voss_*` (déjà), `AI_PirateSoldier`, `AI_PirateSniper`, `AI_PirateShotgun` |
+| `LDA_PoliceCyborg` (neuve) | argent 0,5 ; munitions 0,4 ; bandage 0,2 ; matière 0,2 ; arme portée 0,10 | `AI_Cyborg_Police` |
+| `LDA_Drone` (neuve) | matière 0,6 ; munitions 0,3 | `AI_DronePolice`, `_Captain`, `_Heavy` |
+| `LDA_Autonome` (neuve) | matière 0,5 ; munitions 0,3 ; argent 0,3 | `AI_AutonomusPolice`, `AI_AutonomusPatrol` |
+
+Branchement par override du composant hérité (`get_object_for_blueprint`, garde-fou sur le chemin
+du template), compilation et sauvegarde des 9 BP ; `AI_Cyborg`, `BASE_Drone`, `BASE_Autonomus`,
+`ALS_Base_CharacterBP`, `CombatComponent` et `DA_AllRef` byte-identiques après coup. Sauvegardes :
+`Saved/LootRework_Backup_20260905/`. Le chapeau Voss (prix 1300, revente 650) valait 20 à 60 drops
+d'argent par mort en « toujours » : il passe à 20 % pour rester une trouvaille.
+
+### 12.3 L2, C++ : le canal de mort généralisé (écrit, NON compilé, build à froid QModule)
+
+Fichiers : `QModuleLoot_Settings.h` (struct `FQModuleLoot_DeathDropRule` et bloc « Death drops »),
+`QModuleLoot_World_SubSystem.h/.cpp` (`Loot_NotifyAgentDeath`, `ResolveDeathRule`, `PickDeathTier`,
+`LoadDeathTable`, `SpawnDeathDropInternal`, `Loot_ForceDeathDrop`, `Loot_SimulateDeathRolls`,
+`LegacyPoliceDeathRoll`, délégué natif `OnDeathDropNative`), `QModuleLoot_TestCommands.cpp`
+(`qmoduleloot.DeathDrop [common|advanced|prototype]`, `qmoduleloot.SimulateKills <Classe> [N]`),
+`Config/DefaultGame.ini` (section `[/Script/QModule.QModuleLoot_Settings]`).
+
+Mécanique, une fois par mort, serveur seul : règle par nom de classe (nom exact, sinon le mot-clé
+contenu le plus long : `AI_DronePolice_Captain` bat `AI_DronePolice`), chance de base, **pitié par
+joueur** (au-delà de 40 morts éligibles sans module, +1 point par mort, plafond 50 %, compteur par
+`PlayerState` id, session serveur, non persisté), **stat de chance du tueur**
+(`Stat.Cyborg.Loot.RareChanceAdd`, module Fortune de guerre, chance x (1 + valeur) : la stat a
+enfin un lecteur), tirage de l'étage (poids C / B / A de la règle), item pondéré dans la table de
+l'étage (rouleur C++ `RollWeightedItem`, poids relatifs), spawn répliqué par `SpawnPickupActor`
+(respawn 0 écrit, durée de vie `WorldDropLifetimeSeconds`, `DropSpawned`), puis
+`OnDeathDropNative.Broadcast(DeadAgent, Killer, Item, Tier)` pour le futur feedback (son, toast).
+Tueur : `GetLastInstigatorControllerNative()` puis le causer de dégâts ; une mort non attribuée à
+un joueur roule quand même la chance de base (sans pitié ni chance). **Rétrocompatibilité** : une
+liste `DeathDropRules` vide exécute le canal police de la section 11 tel quel.
+
+| Règle (mot-clé) | Chance | C / B / A |
+|---|---|---|
+| `AI_DronePolice_Captain`, `AI_DronePolice_Heavy`, `AI_Voss_Commandent` | 6 % | 50 / 40 / 10 |
+| `AI_Voss`, `AI_Pirate`, `AI_Cyborg_Police`, `AI_AutonomusPolice` | 3 % | 70 / 25 / 5 |
+| `AI_DronePolice` | 1,5 % | 70 / 25 / 5 |
+
+Étages (tables `LDA_QMLoot_DeathCommon` / `DeathAdvanced` / `DeathPrototype`, poids relatifs) :
+C = 9 passifs à 50 k et 100 k (poids 100) ; B = 15 passifs à 150 k (100), Contre-mesures Voss et
+Masque phéromonal (70), Réseau de recruteur et Vérins de saut (50), Nid de guêpes et Nid de frelons
+(40) ; A = Antenne longue portée (100), Balise de frappe, Drone médical, Largage, Tourelle (60),
+Propulseur orbital (40). Exclus du loot de mort : les 3 reliques à 600 k, la Matrice de Q028 et les
+coquilles inertes. Modèle : 40 morts mélangées donnent 1,2 module en moyenne ; avec la pitié, 1 module
+toutes les 27 morts en moyenne et jamais plus de 74 morts sans rien ; un prototype une fois sur
+650 morts standard (170 élites).
+
+### 12.4 Vérifié en PIE le 2026-09-05 (15:28, éditeur partagé, binaires du build de 14:55)
+
+- `qmoduleloot.Status` : `rules=8`, tables `common=1 advanced=1 prototype=1`, pitié 40 / 0,010 / 0,50.
+- `qmoduleloot.SimulateKills AI_Voss_Soldier_C 10000` (chance forcée à 1 pour la session) : répartition
+  mesurée 7000 / 2481 / 519, soit 70,0 / 24,8 / 5,2 % pour une cible 70 / 25 / 5 ; `AI_DronePolice_C`
+  7034 / 2494 / 472 ; `Chicken_AnimalBP_C` : aucune règle (les animaux ne donnent pas de modules).
+- `qmoduleloot.DeathDrop prototype` : pickup `IDA_QModuleCy_LargageDeRavitaillement` spawné.
+- **Mort réelle** : le drone police de test a été tué par le Voss de test (hostilité IA contre IA,
+  `DispatchWorldKillEvent KilledActor=AI_DronePolice_C_0 KillerActor=AI_Voss_Soldier_C_0`) et la ligne
+  `Death drop: 'IDA_QModuleCy_ChasseurDePrimes' (tier 0) from 'AI_DronePolice_C'` a suivi 4 ms plus
+  tard : le hook QAI, la règle, l'étage, la table et le spawn répliqué tiennent en conditions réelles.
+- **Anomalie mesurée** : le même drone a accepté un `ServerKill` dix secondes après sa première mort
+  (donc `IsAlive` redevenu vrai côté QCombat) et a lâché un second module. Cause non identifiée
+  (soupçon : réécriture de `CurrentLife` par réflexion depuis QAI sur un agent mort, ou double monde
+  PIE). Garde-fou ajouté le jour même dans les deux canaux (loot et prime) : une seule évaluation par
+  acteur mort (`AgentsAlreadyRolled` / `AgentsAlreadyPaid`, ensembles bornés à 4096). À creuser côté
+  QCombat / QAI : un cadavre qui redevient tuable ferait aussi rejouer le loot classique du BP.
+
+### 12.5 Reste à faire et à valider
+
+1. Tables d'étage créées (15:07) et compilation faite par la session voisine (Succeeded 14:55) ; le
+   garde-fou anti double mort du 15:33 attend le rebuild suivant.
+2. Test PIE complet sur L_Dev_Claude avec Benja (les morts Voss, pirate, police cyborg et autonome n'ont
+   pas pu être déclenchées : collisions sur le pont partagé ; la simulation couvre leurs règles) : `qmoduleloot.Status` (rules=8, tables 1/1/1), `qmoduleloot.SimulateKills
+   AI_Voss_Soldier_C 10000` (attendu 3 %, répartition 70/25/5), `qmoduleloot.DeathDrop prototype`
+   (un pickup `IS_QModuleCy_*` au sol), puis une mort réelle (`ServerKill` sur le `CombatComponent`
+   d'un `AI_DronePolice` spawné, chance forcée à 1 sur le CDO des réglages pour la session) et la
+   ligne `Death drop:` dans le log. Attention : un PIE lancé par le pont se fige sur la boîte modale
+   « Blueprint Compilation Errors » (StarMap_IconCanvas ne compile pas) : clic humain requis.
+3. Non vérifié en jeu : le spawn effectif des drops Voss argent/munitions (le réplicateur demande la
+   position au client, ou les pièces sont trop petites pour être vues) ; à observer avec Benja.
+4. Lots délégués livrés le même jour : 17 viandes (`/Game/Items/Meat`, String Table
+   `LootItemLocalizationTable`) et 2 pièces machine (`/Game/Items/Components`), 17 tables `LDA_Animal_*`
+   branchées sur les 16 `*_AnimalBP` et `Crocodile_BP` (vérifié par spawn), noyau de drone et puce IC Labs
+   en « toujours lâché » sur `LDA_Drone` et `LDA_Autonome`, 5 marchands NPC humains achètent la viande
+   (Barman, PawShop, 3 Medicine sellers) ; les deux modules de prime IC Labs Industries sont décrits dans
+   `QMODULE_ARCHITECTURE.md` (section 19) et `QMODULE_CATALOGUE.md` (section E). Reste ouvert : la
+   sémantique d'une liste d'achat vide chez un marchand (arrêté sur demande de Benja), la localisation des
+   libellés de module (dette partagée avec les 138 existants), la réparation d'un cadavre par `Combat_Repair`.
+
 *Document rédigé le 2026-08-07, mesures en éditeur. Implémentation, revue et
-section 11 le 2026-08-14.*
+section 11 le 2026-08-14, section 12 le 2026-09-05.*

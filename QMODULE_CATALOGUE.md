@@ -92,7 +92,7 @@
 | Peau caméléon (Voss) | C | Quasi-invisible immobile, drain d'énergie (instable) | ➕ |
 | Faux transpondeur | P | Les scanners ennemis t'affichent comme neutre | ➕ PvP sensible |
 
-### E. Économie & Prospection (12)
+### E. Économie & Prospection (14)
 | Module | T | Effet | Ancrage |
 |---|---|---|---|
 | Compacteur de matière | P | Matter max +200/400/600 | ✔ module actuel (General System) |
@@ -107,6 +107,8 @@
 | Assurance IOLA | P | Conserve 25/50 % des coins à la mort | ? règles de mort |
 | Contrebandier | C | Vend les objets marqués/volés chez les pirates | ➕ |
 | Protocole de partage | P | Récompenses de groupe +10 % | ➕ coop |
+| **Prime d'extermination** (2026-09-05, BRANCHÉ, test PIE à faire) | P | Prime versée à chaque Sangline tué : 20/30/40 crédits par kill standard (x3 sur les variantes de mur et la Sangline noire, x0,4 sur les minis, x1,25 sur un infecté, x12 sur un boss infecté) | ✔ C++ `QModuleBounty_World_SubSystem` abonné à `UQAI_AgentComponent::OnAnyAgentDiedNative` (serveur seul) ; stat `Stat.Cyborg.Bounty.SanglineCredits` ; crédit par `InventoryComponent.AddCoins` + toast `Lib_Reward.SendToPlayerMoneyRewardFeedback` |
+| **Prime anti-Voss** (2026-09-05, BRANCHÉ, test PIE à faire) | P | Prime versée à chaque hors-la-loi tué, Voss et pirates : 40/60/80 crédits par kill standard (x3 sur un commandant Voss) | ✔ même canal C++ ; stat `Stat.Cyborg.Bounty.VossCredits` ; cibles et multiplicateurs dans `[/Script/QModule.QModuleBounty_Settings]` de `DefaultGame.ini` |
 
 ### F. Ingénierie & Déployables (16)
 | Module | T | Effet | Ancrage |

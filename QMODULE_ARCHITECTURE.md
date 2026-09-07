@@ -2767,3 +2767,194 @@ rack identique (pied <-> vehicule) ne change rien : comportement hors lobby inch
 Seul enfant a ce jour : `W_HudModulePassives` (recherche de chaine sur Content/, terminee).
 **RESTE** : cold build QModule editeur ferme (Benja), puis voir le lobby sans icones, et l Univers
 avec la rangee au premier spawn, apres une mort/respawn et apres un voyage.
+
+### 15.35 La FICHE CYBORG : l onglet Statistiques devient un bilan du personnage (2026-09-05)
+
+**Demande (Benja)** : le menu des statistiques ne dit rien des modules ; il veut la liste des
+caracteristiques du personnage, par membre, avec ce que chaque module (surtout passif) change.
+Proposition et maquette validees le jour meme (`Documentation/QMODULE_FICHE_CYBORG_PROPOSITION.md`).
+
+**Ce qui existait** : `W_Stats_Overview` (niveau, XP, 4 jauges, registres) sans aucun appel QMOD,
+points de phase lus sur le stock legacy `SS_Phase`, cliche a l ouverture ; le BILAN CYBORG du mur
+(deltas seulement, 8 lignes, malus fondus, base hors perimetre, par. 15.32) ; en jeu un passif =
+une icone.
+
+**Livre (C++ QModule, aucun asset modifie a la main, un reparentage)** :
+- `QModule_CyborgSheetTypes.h` : `FQModule_SheetAttribute` (registre d une ligne : zone, libelle,
+  format, tag de stat, SOURCE DE BASE, note, candidats) et `FQModule_StatContribution` (part d un
+  module dans une stat). 7 zones de PRESENTATION (`EQModule_SheetZone` : tete, torse, bras, noyau,
+  dos, jambes, soute) : les QMD ne portent toujours aucune notion de corps, le mapping vit ici.
+- `UQModule_StatLibrary::QMOD_GetStatBreakdown[FromRack]` et `QMOD_PreviewStatFromRack` : la
+  decomposition par module et la simulation d un palier, construites avec les MEMES regles que
+  `BuildStatAggregates` (valeur par niveau, echelle d adjacence, drawbacks flagges). Ce que la fiche
+  DIT ne peut pas deriver de ce que le rack APPLIQUE.
+- `UQModule_CyborgSheetWidgetBase` (3 unites .cpp) : parent de reparentage de `W_Stats_Overview`,
+  meme patron que `UQModule_LegacyPhaseSwap` pour `W_PhaseTree` : dormant si QModule est desactive
+  (la fiche Blueprint rend comme avant) ; QModule actif -> les enfants Blueprint du root sont replies
+  SAUF le conteneur `MenuContainer_Stats` (cadre et bandeau de titre partages), et la fiche native se
+  construit dans le meme root. Herite de `UQModule_HudRackWidgetBase` (rack, late-bind, garde pawn ;
+  deux crochets natifs ajoutes : `NativeOnResolvedRackChanged`, `NativeOnRackUnbound`). Relais de
+  visibilite pose sur l ONGLET hote (`GetTypedOuter<UUserWidget>()` = `W_Statistics`) avec les
+  garde-fous du swap du mur. Rafraichissement evenementiel : `OnRackChanged`, `CombatStateUpdate`
+  (QCombat), `OnStatUpdated` de `SS_Matter` et `SS_Level`, `InventoryUpdate` (dispatchers BP lies
+  par reflexion, 0 ou 1 parametre objet), sinon drapeau "sale" repeint a l ouverture. Zero tick.
+- Registre V1 : 40 lignes, UNIQUEMENT des stats qui ont un lecteur (8 BP + 5 C++ mesures le
+  2026-09-05). Une ligne d un gadget n apparait que si le module est installe (`RequiredModuleTag`).
+  Regle "le jeu a toujours raison" : quand le runtime porte la valeur finale (QCombat MaxLife /
+  MaxShield, `SS_Matter.MaxMatter`, `InventoryComponent.GetInventorySize`, `IS_JetPack.MaxFuel`), la
+  fiche affiche CETTE valeur et derive la base a l envers (`Final / MultAccum - AddSum`).
+  Bases constantes documentees pour le reste (sprint 700 x 0,85 uu/s, regen 1 PV/s, facteurs 1,0...).
+- Ecran : en-tete (hexagone de niveau, XP L^3, portefeuille V2 par palier, cellules actives, modules,
+  credits), deux colonnes de cartes par zone, le VRAI cyborg en 3D au centre avec un repere
+  hexagonal cliquable par zone (voir "Vue 3D" ci-dessous), colonne de decomposition (base, une ligne par module avec niveau, malus en rouge, valeur en jeu,
+  PROCHAIN PALIER simule, modules candidats), pied : VOIR LES REGISTRES (switcher parent index 0,
+  comme l ancien `GoToRecords`) et OUVRIR LE MUR (`BPI_SetActiveTab` du hub par reflexion).
+- Mur (`RefreshModuleSheet`) : bloc IMPACT SUR TA FICHE sous les niveaux : pour chaque StatMod et
+  Drawback lu par la fiche, valeur maintenant -> valeur au palier suivant, sur la base VIVE de la
+  fiche (`QMOD_ReadLiveBase`), malus nommes ; "aucun effet mesurable" si aucune stat n a de lecteur ;
+  bouton VOIR DANS LA FICHE (bascule l onglet Statistics). `StatLabelForTag` est devenue publique.
+- Instrument : `QMOD_DumpSheet()` (BlueprintCallable) ecrit `QSHEET_DUMP|ROW|id|base|final|contribs`
+  pour diffuser l affiche contre la verite.
+
+**Contrats gardes** : `W_Statistics` et son event d interface `Update` (intacts), `Switcher_Views`
+(index 0 registres, index 1 la fiche), le bouton `< FICHE CYBORG`, l index 4 du hub, le conteneur
+StarMap. Les 3 fonctions Refresh* de l ancienne fiche tournent toujours, repliees.
+
+**Dette assumee** : libelles en francais culture-invariant ASCII (comme la fiche remplacee et le
+chrome du mur ; la passe String Table en/fr/es reste a faire, `Game_Gather.ini` n a toujours pas
+d etape `GatherTextFromSource`). Bases de mouvement constantes (a recaler si `DT_MovementModelCyborg`
+change). Les reperes de zone sont poses a des ancres normalisees (`ZoneMarkerAnchors`, reglables
+sur le BP) : ils ne suivent pas le squelette, seulement le cadrage.
+
+**Vue 3D (retour Benja le jour meme : "la forme du cyborg en fond n est pas belle, generee par IA,
+ne reflete pas mon cyborg de deuxieme generation")** : le schema en plaques a ete REMPLACE par la
+brique du jeu `W_ActorViewDisplay` (celle de l onglet Equipement), instanciee par la fiche et pilotee
+par reflexion. Contrat MESURE sur l export T3D de la brique et de `W_Equipment` (2026-09-05) :
+- `UseSceneCapure2d` (bool, faute d origine) doit etre VRAI AVANT `EnableActorView`, sinon la brique
+  fait `SetViewTargetWithBlend` sur le stand : le menu detourne la camera du joueur (vu en PIE).
+  `EnableSceneCapture2d` est une FONCTION (Width, Height), pas une variable : elle cree la render
+  target aux tailles `X_Size2d` / `Y_Size2d` (1024 x 1024 par defaut) et ne montre que l acteur
+  (`ShowOnlyActorComponents` + acteurs attaches).
+- La render target est peinte sur TOUTE la taille de la brique : dans un panneau 3:4 une cible
+  carree ecrase le personnage d un quart en largeur (vu en PIE). La fiche impose donc
+  `ActorViewRenderSize` (768 x 1024) a la brique ET l enferme dans un `UScaleBox` ScaleToFit sur un
+  `USizeBox` du meme ratio : plus aucune deformation, quelle que soit la resolution.
+- Le stand (`ActorViewStand`) est spawne a la rotation de l acteur et attache a sa racine ; son bras
+  camera part DERRIERE le personnage (yaw 0 = vue de dos, vu en PIE). L onglet Equipement enchaine
+  apres `EnableActorView` : `SetMinMax(810, 910)`, `SetMoveOffsetMinMax(0, 0)`,
+  `SetRotationClamp(45, 180)`, `SetViewRotation(0, 180, 0)` (la camera passe DEVANT), puis
+  `SetPositionZoom((0,0,0), 810)` avec un champ de 12 degres : la fiche rejoue exactement cette
+  recette (`ApplyActorViewFraming`), valeurs exposees en `UPROPERTY` (`ActorView*`) pour un reglage
+  sans C++. Le pivot `ActorPivotOffset` passe par `SetSocketTarget -> SetArmOffset`, dont la
+  position est bornee par `ClampVectorSize` avec des bornes venant d un AUTRE evenement
+  (`AddArmOffset`) : ne pas compter sur lui pour le vertical ; la racine d un Character etant le
+  centre de la capsule, le corps est deja centre a pivot nul.
+- Reperes : ancres normalisees sur le rectangle AJUSTE (letterbox), recalculees par
+  `UpdateMarkerLayout` depuis `NativeTick` uniquement quand la taille de l hote change (les widgets
+  BP dont le parent natif redefinit `NativeTick` tickent : `bClassRequiresNativeTick`).
+- Dette de la brique, non touchee : un `Print String` a l ecran sur son Tick ("Actor Display
+  Offsets ...", visible en Development, muet en Shipping).
+
+**Etat** : compile (QangaEditor 2026-09-05 15:56, Succeeded, 39 s). Validation PIE sur L_Dev_Claude
+le 2026-09-05 : `QMOD_DumpSheet` diffe contre la verite (QMOD_GetStat, SS_Matter, InventoryComponent,
+QCombat, SS_Level, sockets du rack) : 40 lignes concordantes a deux reprises (sprint 743,75 uu/s
+puis 642,6 apres le passage des Servomoteurs a L1, matiere 700 / base derivee 100, slots 22 / base 4,
+regen 4, chute 100 pour cent, detection 55 pour cent, bouclier OFFLINE, vie 100, niveau 5 / 182 XP,
+198 000 credits) ; camera joueur intacte (cible de vue = le pawn) avec la vue 3D en mode capture ;
+cadrage de face sans deformation VALIDE en direct par Benja a 16:16 ("c est nikel").
+**STATUT PIE** : valide (2026-09-05 16:16). Reste : passe String Table des libelles ; au tout premier
+affichage juste apres le chargement, l en-tete peut montrer 0 (niveau, XP, credits) jusqu au premier
+evenement SS_Level / InventoryUpdate (mesure une fois a 17 s du spawn, correct a 25 s).
+
+## 19. Modules de prime : payer le joueur pour ses kills (2026-09-05)
+
+Deux modules cyborg passifs demandes par Benja : **Prime d extermination** (famille Sangline) et
+**Prime anti-Voss** (hors-la-loi : Voss ET pirates, les deux unifies cote gameplay meme si
+`EQCombatFaction` separe encore Pirate=4 et Voss=7). Ils ne donnent aucun objet : ils versent des
+**credits** au tueur, a chaque mort d agent, cote serveur.
+
+### 19.1 Fichiers
+- `Plugins/QModule/Source/QModule/Public/QModuleBounty_Settings.h` + `Private/QModuleBounty_Settings.cpp`
+  (`UDeveloperSettings`, section `[/Script/QModule.QModuleBounty_Settings]` de `Config/DefaultGame.ini`).
+- `Public/QModuleBounty_World_SubSystem.h` + `Private/QModuleBounty_World_SubSystem.cpp` (le canal).
+- `Private/QModuleBounty_TestCommands.cpp` (5 commandes console statiques).
+- Helper partage `QModuleLoot::ResolveKillerController` (`QModuleLoot_Library.h/.cpp`), deplace la
+  depuis `QModuleLoot_World_SubSystem` pour que les drops de mort et les primes ne puissent PAS
+  diverger sur la question "qui a tue".
+- Donnees : `QMD_PrimeExtermination` / `QMD_PrimeAntiVoss` (`/Game/Phases/QModuleV2/`), paires
+  `IDA_`/`IS_QModuleCy_Prime*` (`/Game/Items/QModuleCyborg/`), icones `T_QMI_Prime*`
+  (`/Game/Widget/QModuleV2/Icons/`), tags dans `Config/Tags/QModuleTags.ini`.
+
+### 19.2 Hook de mort : evenementiel, zero tick, zero poll
+`Initialize` s abonne UNE fois a `UQAI_AgentComponent::OnAnyAgentDiedNative`, la meme source native
+que le canal de loot : diffusion autorite seulement, exactement une fois par mort, cadavre encore
+valide. Le delegue est **statique**, donc il tire pour tous les mondes du process (serveur d ecoute
+PIE + client dans le meme process) : `HandleAnyAgentDied` compare `DeadAgent->GetWorld()` au monde
+du subsystem AVANT toute autre chose. `Deinitialize` retire le handle. `DoesSupportWorldType` limite
+a `Game` et `PIE`. Aucune dependance a `QLevel` : le canal marche aussi dans les maps de dev.
+
+### 19.3 Formule
+1. `ClassifyTarget(DeadAgent)` : d abord les **mots-cles de classe** (nom exact avec ou sans le
+   suffixe `_C`, sinon le mot-cle contenu LE PLUS LONG, donc `SuperSanglineWall` bat `SanglineWall`
+   bat `Sangline`), ensuite seulement, en filet, la **faction QCombat** du cadavre
+   (`Infected` paye la prime Sangline, `Pirate`/`Voss` la prime hors-la-loi) au
+   `FactionFallbackMultiplier`. Le mot-cle est primaire parce que les pawns de la famille Sangline
+   ne portent PAS de faction par defaut (mesure du 2026-09-05 : seule la lignee `AI_Infected_*` en a
+   une).
+2. Le tueur doit etre un **joueur** : `QModuleLoot::ResolveKillerController` (instigateur du dernier
+   degat, sinon le causeur), caste en `APlayerController`. Une mort IA contre IA, une chute, le
+   decor ou un suicide ne paient rien.
+3. `PerKill = UQModule_StatLibrary::QMOD_GetStat(KillerPawn, StatTag, 0.0f)`. **La valeur de la
+   prime n est PAS dans le `.ini`** : elle est publiee par la definition du module comme une stat
+   (op `Add`, `ValuePerLevel`), donc le mur, la fiche cyborg et l agregation la lisent comme
+   n importe quel autre bonus, et l adjacence la module comme les autres. Pas de module en place, ou
+   module non alimente par une phase : la stat vaut 0 et rien n est verse.
+4. `Credits = Clamp(Round(PerKill * Multiplicateur), 0, MaxCreditsPerKill)`. Le plafond est un
+   garde-fou contre un `ValuePerLevel` mal saisi, pas un levier de design.
+
+Valeurs livrees : `Stat.Cyborg.Bounty.SanglineCredits` 20/30/40, `Stat.Cyborg.Bounty.VossCredits`
+40/60/80. Multiplicateurs du `.ini` : 3 pour SuperSanglineWall / SanglineWall / BlackSangline, 0,4
+pour SanglineMini, 1,25 pour Infected, 12 pour Infected_Boss, 3 pour Voss_Commandent, 1 partout
+ailleurs. Une Sangline passee en version lean par les `LeanClassRedirects` de QAI devient
+`DEFAULT_Sangline_AILean` et perd son identite de variante : elle paie donc le tarif standard.
+
+### 19.4 Contrats reflectifs (CLAUDE.md par.4)
+Le versement passe par deux fonctions Blueprint appelees **par nom**, donc geles :
+- `InventoryComponent_C.AddCoins` sur le pawn du tueur (le meme contrat que
+  `QAI_CyborgRecruitmentComponent` utilise deja pour le cout de recrutement). Le parametre de
+  montant est cherche sous le nom `CoinsToAdd`, sinon le premier parametre numerique d entree.
+- `Lib_Reward_C.SendToPlayerMoneyRewardFeedback` pour le toast (la chaine que le `MoneyReward` de
+  `CombatComponent` emprunte deja). Parametres cherches sous `TargetPlayerState` et `Quantity`, avec
+  repli positionnel.
+Les quatre noms (classe de composant, fonction de credit, classe de bibliotheque, fonction de toast)
+sont **exposes dans le `.ini`** : un renommage cote Blueprint se repare sans recompiler le C++.
+Le subsystem ne replique rien lui-meme : le portefeuille et le toast se repliquent deja tout seuls,
+exactement comme pour les recompenses de quete.
+
+### 19.5 Producteur natif
+`OnBountyPaidNative(DeadAgent, KillerController, Credits, Kind)` est diffuse apres que les credits
+ont atterri. Un futur compteur de statistiques, un succes ou un son s y abonne, il ne scrute pas le
+portefeuille (regle CLAUDE.md par.5 : on se branche sur la SOURCE).
+
+### 19.6 Commandes de test et configuration
+```
+qmodulebounty.Status                 etat, tags de stat, nb de regles, compteurs (morts vues,
+                                     classifiees, primes payees, credits verses)
+qmodulebounty.Enable / .Disable      forcage de session, config intacte
+qmodulebounty.Simulate <Classe> [SanglinePerKill=40] [OutlawPerKill=80]
+                                     ce que paierait UN kill de cette classe, sans tuer personne
+qmodulebounty.TestPay <Credits>      credite le joueur local par le VRAI chemin de paiement
+                                     (inventaire + toast) : exerce les deux contrats Blueprint
+```
+`Enabled=True` par defaut : la fonctionnalite a ete demandee explicitement, et le canal reste inerte
+tant qu aucun joueur n a installe l un des deux modules (la stat vaut 0). Retour arriere :
+`Enabled=False`, rien d autre.
+
+**PIEGE de configuration deja documente ailleurs, rappele ici** : une liste `+SanglineTargets=` du
+`.ini` **REMPLACE** la liste du constructeur C++, elle ne s y ajoute pas. Les deux listes du `.ini`
+doivent donc rester completes.
+
+### 19.7 Ce qui reste a valider
+Le C++ compile (QangaEditor, 2026-09-05 14:55, Succeeded). **Aucun kill reel n a encore ete paye en
+PIE** : protocole de recette dans le rapport de session (`qmodulebounty.Status`, puis
+`qmodulebounty.Simulate BASE_Sangline_C`, puis pose du module au mur et kill d une Sangline).

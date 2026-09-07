@@ -816,8 +816,10 @@ reference (collision, foliage, dedicated server, every height query); the GPU pa
   `WSHeightfieldGenerate.usf` with the same noise math as the CPU (five noise classes: Qanga, Earth, CustomWorld,
   TheMoon, HeightMapBased), the planetary heightmap (UV in double precision), heightmap volumes and hole volumes.
 - A cube sphere quadtree (`FWSQuadtreeManager`) picks the visible tiles from a screen space error; each tile becomes
-  one indirect draw of a persistent vertex buffer (`WSMeshGenerate.usf`, 112 bytes per vertex, vertex colour linear
-  like the CPU clipmap).
+  one indirect draw of a persistent vertex buffer (`WSMeshGenerate.usf`, 112 bytes per vertex, vertex colour RGB
+  sRGB-encoded like the CPU clipmap rings, which `UWorldScapeLod::UpdateMesh` fills through
+  `UpdateMeshSections_LinearColor` with its default `bSRGBConversion = true`; the encoding is the bit-exact port of
+  `FLinearColor::ToFColorSRGB`, see `WSPackColorToFColorSRGB` in `WSMeshGenerate.usf`; the hole alpha stays linear).
 - Not ported: noise volumes (a root that has some stays on the CPU with a warning), ray tracing, runtime virtual
   textures, split screen.
 
@@ -875,12 +877,41 @@ frame instance buffer with the GPU scene instance index (`InstanceId - InstanceS
 reorder instances). `FDrawItem::FirstInstance` travels in `FMeshBatchElement::UserIndex`, the batch declares
 `NumInstances` identity instances through `FMeshBatchDynamicPrimitiveData`. The tile centre is computed once on the
 CPU in double (`WS_ComputeTileCenter`) and given to both the mesh compute and the instance, so both sides agree bit for
-bit. Tiles that are not renderable this frame get no instance at all. Statistics: `DrawItems=` (groups), `Instances=`,
+bit. That centre is the centre of the tile on the cube face, not on the sphere: on the flanks of a face it sits
+hundreds of km from the ground (0.73 x PlanetScale at a corner), which left a float vertex only 8 to 16 cm of
+resolution (a constant 4 to 8 cm error, a staircase of blocks below ~3 m cells, quadtree depth 14 and deeper;
+invisible at the centre of a face such as the pole of L_Dev_Claude). Since 2026-09-05 the vertices are stored relative
+to a tile reference point: that centre lifted to the sphere and to the height of the centre texel
+(`ComputeTileReferenceOffset` in `WSMeshGenerate.usf`, all in double). The float3 offset between the CPU centre and the
+reference travels in the padding word of the first three vertices of the tile; the vertex factory reads it back and
+rebuilds the camera relative position with error free float sums (`WSTwoSum`), so the cancellation of the two large
+terms (camera to cube centre, centre to terrain) loses nothing. Emulated error: 0.005 cm at any depth. The remaining
+floor (about 0.15 to 0.3 cm) comes from the noise ports accumulating `HeightNorm` in float and from the R32F height
+texel: visible only below ~3 cm cells (depth 21 and deeper). Tiles that are not renderable this frame get no instance
+at all. Statistics: `DrawItems=` (groups), `Instances=`,
 `Inst=` (instance buffer KB), `ProxyInst=` (the proxy saw the instance buffer).
 Every instance carries its own local bounds (`WS_ComputeTileLocalBounds`: the tile's 3 x 3 grid lifted to the sphere,
 plus the height margin and the sphere sagitta), passed through `FMeshBatchDynamicPrimitiveData::InstanceLocalBounds`, so
 GPU scene culls tiles individually (frustum, HZB occlusion, virtual shadow map pages, local light shadow views). Without
 them an instance inherits the primitive bounds, the whole planet, and is drawn into every shadow page and light view.
+
+## Quadtree visibility test
+
+Every node is tested against the camera before it is refined or output (`IsTileVisibleBySamples` in
+`WSQuadtreeManager.cpp`): the camera space box of its sample points, expanded by the height margin
+(`MaxDisplacementWorld`), against the four frustum sides, then a horizon test (the dot product of the camera position
+with at least one sample must reach the squared radius of the sample sphere, minus the margin). The samples are the
+tile centre, its four corners and its four edge midpoints lifted to the ground radius under the camera
+(`CameraGroundRadius`), plus, since 2026-09-06, the tile point nearest to the camera: the camera projected on the cube
+face plane, clamped to the tile rectangle and lifted to the same sphere. Without that tenth point a node much larger
+than the horizon had all its samples beyond it while the camera stood on the node: a root face spans 90 degrees and the
+horizon test accepts about 12 degrees at ground level, so the root was culled, the tree never descended, and nothing at
+all was drawn below roughly 20 km of altitude except within 12 degrees of a face corner or edge midpoint (the world
+origin of the Universe sits 4 degrees from an edge midpoint of the +Z face, which is why the top of the planet always
+worked and the flanks never did). The horizon is that of the sample sphere (`SurfaceRadius`), not the reference sphere,
+so ground below PlanetScale (ocean floors) does not fail the point right under the camera. With the debug flag, the
+signature of a culled root is the warning `No draw work (Chunks=0 ...)` every second; `QVis=` and `QCull=` count the
+nodes visited and culled.
 
 ## Stitching between depths
 
