@@ -12,8 +12,9 @@
 - Révision auditée: `dc587c4530`, branche `master`, worktree partagé et fortement dirty le 30 août 2026.
 - Index RzMCP: schéma `4`, complet, `58 428` assets `/Game`, généré le `2026-08-30T15:17:16.899Z`. Les assets plugin DataManager ont été interrogés directement via l'Asset Registry.
 - Les comptes de graphes/nœuds et référents viennent de lectures RzMCP effectuées avant la fermeture de l'Editor. Aucun asset n'a été chargé, compilé, sauvegardé ou rescanné pour cet audit.
-- Les modifications concurrentes non committées des autres workers ne sont pas considérées comme des contrats P1 intégrés.
-- Le dépôt ne contient encore aucun module natif Inventory ou Combat neutre. Ils restent des prérequis, pas des propriétaires que P2 peut deviner.
+- Les comptes et traces ci-dessous restent l'instantané historique du 30 août ; ils ne sont pas réinterprétés comme une mesure du code courant.
+- Correction d'état au 7 septembre : `QInventory` et `QCombat` existent maintenant comme noyaux natifs, `CombatComponent_C` est reparenté sur le propriétaire production `UQCombatComponent`, et DataManager expose un bridge natif exact de rows durables déjà consommé par Offline Tutorial. Le premier adapter Inventory production est en cours dans une lane séparée mais n'est pas encore intégré ni validé.
+- Le gate natif courant couvre `QInventory` `36/36` et `QStorage` `11/11` après compilation Live Coding. Pour Combat, la source enregistre `23` tests et le dernier `23/23` reste le checkpoint historique du document 09 ; aucun nouveau build ou run Combat n'est revendiqué par cette mise à jour documentaire.
 
 ## 1. Inventaire Unreal Insights et EasyTraceAnalyzer
 
@@ -86,14 +87,13 @@ Le C++ `UVehicleMovementComponent` active son tick seulement quand nécessaire, 
 
 | Appel actuel | Frontière réelle | Dépendance |
 |---|---|---|
-| `QWeaponBulletSubsystem.cpp:570-592` appelle `GetEquippedItemInstanceBySlot` par `FindFunction/ProcessEvent` | Weapon lit l'inventaire BP | contrat P1 Inventory |
-| `QWeaponBulletSubsystem.cpp:729-763` sonde `IsAlive`, `CurrentLife`, `OnDamage`, `OnDamaged` | Weapon devine le contrat Combat | contrat P1 Combat |
+| `QWeaponBulletSubsystem.cpp` appelle encore `GetEquippedItemInstanceBySlot` par `FindFunction/ProcessEvent` | Weapon lit l'inventaire BP | adapter P1 Inventory live |
 | `QModule_InventoryBridge` centralise génération, ajout, consommation et lecture des item instances par reflection | QModule consomme Inventory | transaction P1 Inventory |
-| `QModule_PersistenceBridge_World_SubSystem.cpp` résout `GameDataManager_C`, `FindDataObjectById`, `IsReadyData`, `Get/SetStringArray` par reflection | QModule consomme DataManager BP | codec/persistence typé P2 après Inventory |
+| `QModule_PersistenceBridge_World_SubSystem.cpp` résout encore les opérations DataObject générales par reflection | QModule consomme le domaine DataManager legacy au-delà du bridge de rows exact | intégration typée P2 après Inventory, pas nouveau backend |
 | `QuestManagerSubsystem.cpp:9517-9585` lit `GetItemDataAsset` et `GetItemInstanceId` par reflection | DQS consomme Obj_ItemInstance | record P1 Inventory |
 | `QuestActionBase.cpp:1575-1613` appelle `RemoveItem` par reflection | action de quête mute Inventory | transaction P1 Inventory |
 
-Ces bridges ne doivent pas être migrés indépendamment avant P1. Le bon résultat est un appel typé vers un seul record/transaction Inventory et un seul contrat Combat. Ajouter un deuxième adaptateur P2 serait un fallback et maintiendrait deux autorités.
+Le probing Combat listé dans l'instantané initial est fermé : QWeapon entre par le funnel de dégâts Unreal et `UQCombatComponent` possède la mutation de vie. Les bridges Inventory restants ne doivent pas être migrés indépendamment avant l'adapter live. Le bon résultat est un appel typé vers un seul record/transaction Inventory ; ajouter un deuxième adaptateur P2 maintiendrait deux autorités.
 
 Le core natif `DynamicQuestSystem` contient aussi des `TActorIterator`, un `GetAllActorsOfClass` sur `AQuestTriggerActor` et plusieurs appels Blueprint par reflection. Ce sont des sujets d'optimisation du core DQS à mesurer séparément. Ils ne rendent pas les petits objectifs designer-authored responsables d'un hotspot.
 
@@ -107,13 +107,15 @@ Le core natif `DynamicQuestSystem` contient aussi des `TActorIterator`, un `GetA
 | `/DataManager/GameDataManager` | 6 vars, 18 fonctions, BeginPlay, 1 dispatcher, 165 nœuds | 26 | Blueprint DataManager |
 | `/DataManager/DataObject` | 30 vars, 68 fonctions, 1 macro, 2 events, 3 dispatchers, 1 085 nœuds | 72 | Blueprint DataManager |
 | `/DataManager/DataManagerLib` | 11 fonctions, 114 nœuds | 52 | Blueprint function library |
-| `/Game/Systems/Item/InventoryComponent` | 44 vars, 67 fonctions, 3 macros, 30 events, 13 dispatchers, 1 595 nœuds | dépendance amont | P1 Inventory BP, propriétaire natif absent |
-| `/Game/Systems/Item/Obj_ItemInstance` | 18 vars, 35 fonctions, 282 nœuds | dépendance amont | P1 Inventory BP |
-| `/Game/Systems/Item/Lib_Inventory` | 20 fonctions, 303 nœuds | dépendance amont | P1 Inventory BP |
+| `/Game/Systems/Item/InventoryComponent` | 44 vars, 67 fonctions, 3 macros, 30 events, 13 dispatchers, 1 595 nœuds | dépendance amont | façade production Blueprint ; core `QInventory` présent, adapter live non intégré |
+| `/Game/Systems/Item/Obj_ItemInstance` | 18 vars, 35 fonctions, 282 nœuds | dépendance amont | objet legacy de la façade P1 Inventory |
+| `/Game/Systems/Item/Lib_Inventory` | 20 fonctions, 303 nœuds | dépendance amont | transfert legacy à remplacer par l'unique adapter P1 |
 
 Référents représentatifs d'`ItemsManagerGS`: `QangaGameState`, `InventoryComponent`, `Obj_ItemInstance`, `Lib_Inventory`, `Lib_ItemSystem`, `ItemDroppedReplicator`, `MarketDynamicRatesComponent`, mission/trade/shop helpers, objectifs de livraison et spawners de loot. Il est live et partagé.
 
-Référents représentatifs DataManager: GameState, Inventory/ItemsManager, stats, missions, véhicules, météo, builder et QModule. Le contenu du plugin est live. En revanche, les dépendances des trois Blueprints DataManager n'incluent pas `/Script/DataManager`: le module C++ ne fournit actuellement aucun contrat runtime.
+Référents représentatifs DataManager dans l'instantané initial : GameState, Inventory/ItemsManager, stats, missions, véhicules, météo, builder et QModule. Le contenu du plugin est live. Depuis cet audit, `UDataManagerBPLibrary` fournit un contrat runtime game-thread-only pour capturer des rows, écrire/flush/recharger, comparer exactement et rollbacker ; Offline Tutorial consomme ce bridge et n'en duplique plus l'implémentation.
+
+Le nom `ResolveOfflineTempDbContext` ne constitue pas une policy réseau : la fonction ne teste aucun net mode et exige `TempDB_C` dans la hiérarchie de classe de la connexion. Le default live `QangaGameState.GameDataManager.DataBaseConnection` est authored `TempDB_C`. `BaseGameMode`, `Lobby_GM`, `Survival_GM`, `Deathmatch_GM` et `Tutorial_GM` pointent exactement vers `QangaGameState_C`, et la recherche ciblée de ces six assets ne trouve aucun writer Blueprint de `DataBaseConnection`. L'ancien Blueprint HTTP `/Game/Systems/Data/QangaDatabaseConnection` a zéro référent Asset Registry et aucune référence texte de configuration ; il ne justifie donc aucun nouvel adapter HTTP. Une mutation runtime ou un GameState/mode hors du scope inspecté reste à exclure avant suppression de l'asset.
 
 `DataObject` porte notamment `BlockingThreadEncode` (`128` nœuds) et `DecodeParserToData` (`83` nœuds), ainsi que les codecs de tableaux et les continuations encode/decode. C'est une verticale de burst mesurable lors d'un flush, pas une justification pour réécrire les 68 fonctions.
 
@@ -122,9 +124,9 @@ Commits de propriété/correction récents:
 - `14d000eb2` corrige la persistance et le rejet des items invalides dans `InventoryComponent`/`Obj_ItemInstance`, toujours Blueprint;
 - `311656ff7` étend le snapshot/restore QModule via le bridge DataManager réfléchi;
 - `5a3982a2a` répare le signal du premier transfert vers un inventaire vide et relie les objectifs natifs de construction à ce flux;
-- aucun commit récent n'a créé un propriétaire natif Inventory/DataManager.
+- à la date de l'instantané, aucun commit audité n'avait encore créé de propriétaire natif Inventory/DataManager ; cette phrase est historique et a depuis été dépassée par `QInventory` et le bridge durable DataManager.
 
-Verdict: `ItemsManagerGS` n'est pas un hotspot CPU indépendant prouvé. La verticale P2 réelle est un record item versionné, transactionnel et sérialisable, fourni par P1 Inventory puis encodé par DataManager. Le bulk migration ItemsManager/DataObject reste bloqué tant que la trace ne montre pas un scope dominant.
+Verdict courant : `ItemsManagerGS` n'est toujours pas un hotspot CPU indépendant prouvé. Le record, la transaction, le codec et la primitive durable existent désormais ; la prochaine frontière est leur consommation par l'adapter Inventory live, pas un second codec ou un backend HTTP. Le bulk migration ItemsManager/DataObject reste bloqué tant qu'une trace ne montre pas un scope dominant.
 
 ### 3.2 Projectiles legacy
 
@@ -146,7 +148,7 @@ Propriétaires natifs existants:
 - `QWeapon` possède le fire hitscan et expose `FireVehicleMachineGun`, `FireMountedVehicleMachineGun` et `FireStaticDefenseMachineGun`;
 - `QWeaponTargetRegistrySubsystem` et `QWeaponTargetingComponent` possèdent le ciblage spatial/homing depuis `3bd272b02`;
 - le mouvement, les flares et la collision des projectiles legacy restent Blueprint;
-- le damage/life reste derrière le contrat Combat BP réfléchi.
+- le damage entre par le funnel point-damage Unreal et la vie appartient au `UQCombatComponent` natif ; les gates réseau/perceptuels Combat restent distincts.
 
 `5721a9b6c` a migré le type/cache de zone de gravité de la grenade vers la classe native correspondante. Ce commit ne migre ni la trajectoire, ni la collision, ni l'autorité du projectile.
 
@@ -210,8 +212,8 @@ Seule exception future: si P1 Inventory expose un événement transactionnel typ
 | Contrat P1 | Consommateurs P2 autorisés | Ce que P2 ne doit pas posséder |
 |---|---|---|
 | Weapon fire control et validation d'autorité | missiles, vehicle fire, turret fire | cadence, ammo, ownership ou RPC parallèles |
-| Inventory record + transaction atomique/rollback | ItemsManager, DataManager item codec, QModule, quêtes | mutation directe de tableaux/maps BP |
-| Combat life/damage/permission snapshot | projectile impact, véhicule/tourelle life et permission, QAI | heuristique `CurrentLife/OnDamage` réfléchie |
+| `QInventory` record + transaction atomique/rollback, puis adapter production live | ItemsManager, DataManager durable rows, QModule, quêtes | mutation directe de tableaux/maps BP |
+| `QCombat` life/damage/permission snapshot intégré | projectile impact, véhicule/tourelle life et permission, QAI | heuristique `CurrentLife/OnDamage` réfléchie |
 
 ### 4.2 Classement
 
@@ -219,10 +221,10 @@ Ce classement est un ordre d'intégration après P1 et après baseline, pas une 
 
 | Rang | Verticale | Preuve | Gate |
 |---:|---|---|---|
-| 1 | Missile runtime + flare manager | Tick par missile + manager global; owner QWeapon déjà disponible | Weapon + Combat intégrés, trace P2-MISSILE |
-| 2 | Turret acquisition/fire/life consumer | timer `1 s`, `FindNearest`, multiplication par tourelle; registre QWeapon disponible | Weapon + Combat intégrés, trace P2-TURRET |
-| 3 | Reliquat gameplay VehicleBase/FlyVehicle BP | chaîne par frame + boucle `0.5 s`; mouvement natif déjà owner | Combat intégré, preuve que les scopes sont actifs |
-| 4 | Item record persistence verticale | DataObject codec/latent + reflection QModule; burst de save/load | Inventory record/transaction figés, trace P2-ITEM |
+| 1 | Missile runtime + flare manager | Tick par missile + manager global; registre QWeapon déjà disponible | adapter Weapon production, QCombat courant, trace P2-MISSILE |
+| 2 | Turret acquisition/fire/life consumer | timer `1 s`, `FindNearest`, multiplication par tourelle; registre QWeapon disponible | adapter Weapon production, QCombat courant, trace P2-TURRET |
+| 3 | Reliquat gameplay VehicleBase/FlyVehicle BP | chaîne par frame + boucle `0.5 s`; mouvement natif déjà owner | QCombat courant, preuve que les scopes sont actifs |
+| 4 | Item record persistence verticale | DataObject codec/latent + reflection QModule; burst de save/load | adapter Inventory live intégré sur les cores existants, trace P2-ITEM |
 | 5 | Ballistic `BP_Projectile` puis grenade | Tick/collision structurels mais durée/concurrence inconnues; grenade sans Tick | mesure d'instances actives et self time avant code |
 | 6 | Bulk ItemsManagerGS/DataManager | graphes massifs mais événementiels, aucun coût steady-state prouvé | ne pas router sans hotspot nommé |
 | 7 | Quêtes isolées | event-driven/designer-authored, core déjà natif | rester Blueprint |
@@ -237,8 +239,8 @@ Les quatre scopes ci-dessous sont disjoints par fichiers source et assets. Ils n
 Objectif: déplacer le mouvement/ordonnancement missile et CheckFlaresHit vers QWeapon, sans changer le fire control, le damage Combat ni la présentation.
 
 Prérequis:
-- P1 Weapon fire control intégré et autoritaire;
-- P1 Combat expose un impact/damage typé;
+- adapter Weapon production intégré et autoritaire;
+- `QCombat` courant conservé comme unique owner damage/life;
 - baseline P2-MISSILE valide avec nombres de missiles/flares comptés.
 
 Ownership source exclusif:
@@ -279,7 +281,7 @@ Objectif: remplacer Loop Timer/FindNearest/UpdateTarget/FireWeapon de TurretBase
 
 Prérequis:
 - P2-01 fournit le projectile missile si le child rocket en a besoin;
-- P1 Weapon et Combat intégrés;
+- adapter Weapon production intégré et `QCombat` courant;
 - baseline P2-TURRET valide.
 
 Ownership source exclusif:
@@ -315,7 +317,7 @@ Gates:
 Objectif: retirer du Blueprint uniquement les sorties gameplay encore cadencées que UVehicleMovementComponent possède déjà ou peut produire sans second owner.
 
 Prérequis:
-- P1 Combat intégré;
+- `QCombat` courant reste l'unique owner damage/life;
 - baseline P2-VEHICLE prouve les scopes VehicleBase/FlyVehicle BP actifs;
 - confirmer le gate runtime du chemin C++ sur chaque classe enfant auditée.
 
@@ -349,33 +351,35 @@ Gates:
 ### P2-04 - Record item persistant vertical, pas bulk DataManager
 
 ```text
-Objectif: sérialiser un FInventoryRecord P1 versionné sur le chemin world-drop aller/retour, puis supprimer uniquement ce chemin refléchi/dupliqué d'ItemsManagerGS/DataObject.
+Objectif: faire transiter un payload complet encodé par `FQInventoryCodec` sur un seul chemin world-drop aller/retour via le bridge durable de rows DataManager existant, puis supprimer uniquement la réflexion ou l'encodage dupliqué de ce chemin.
 
 Prérequis:
-- type record et transaction P1 Inventory intégrés, persistants et figés;
+- adapter Inventory live intégré sur les records/transactions `QInventory` existants;
 - rollback multi-step prouvé;
+- GUID durable écrit par l'autorité, jamais dérivé du `FName` legacy;
+- backend runtime confirmé `TempDB_C` sans override tardif;
 - baseline P2-ITEM avec mêmes records/transactions/bytes.
 
 Ownership source exclusif:
-- Plugins/DataManager/Source/DataManager/Public/DataManagerItemRecordCodec.h
-- Plugins/DataManager/Source/DataManager/Private/DataManagerItemRecordCodec.cpp
-- Plugins/DataManager/Source/DataManager/DataManager.Build.cs seulement si la dépendance au module P1 est requise
+- fichiers de l'adapter Inventory live définis par le document 08;
+- Plugins/DataManager/Source/DataManager/Public/DataManagerBPLibrary.h et son `.cpp` seulement si la primitive de rows exacte exige une extension démontrée;
+- aucun `DataManagerItemRecordCodec` parallèle: `FQInventoryCodec` reste l'unique codec Inventory.
 
 Ownership assets exclusif:
 - /DataManager/DataObject
 - /Game/Systems/Item/ItemsManagerGS
 
 Verticale minimale:
-- un seul record item et un seul round-trip world drop;
-- format versionné et backward compatible;
-- DataManager encode/persiste mais ne mute jamais Inventory;
+- un seul endpoint/payload Inventory et un seul round-trip world drop;
+- format `QInventory` versionné inchangé;
+- DataManager persiste les rows exactes mais ne décode ni ne mute Inventory;
 - Inventory valide et commit/rollback la transaction;
 - erreurs explicites, aucun fallback vers l'ancien record.
 
 Hors scope:
 - migration des 68 fonctions DataObject;
 - shops, market rates, missions, stats, véhicules ou météo;
-- GameDataManager/DataManagerLib;
+- réécriture de GameDataManager/DataManagerLib ou nouvel adapter HTTP;
 - QStorage comme owner Inventory.
 
 Gates:
@@ -444,10 +448,11 @@ Attentes structurelles, pas résultats:
 |---|---|---|---|
 | `/Game/VehicleWeapons/Rocket/Missile_VehicleRocketLauncher` | 0 référent | 0 référence source/config/doc | candidat froid après P2-01; asset local ignoré/non tracked |
 | `/Game/_QData/Proto_Quest` | 0 référent | 0 référence source/config/doc; 0 fonction/event | candidat prototype mort; asset local ignoré/non tracked |
-| `UDataManagerBPLibrary` (`DataManagerBPLibrary.h/.cpp`) | `/Script/DataManager.DataManagerBPLibrary`: 0 référent | seulement sa propre déclaration/constructeur, aucune fonction | wrapper mort prouvé |
-| module runtime `DataManager` actuel | contenu BP ne dépend pas de `/Script/DataManager`; aucun module externe ne le linke | Startup/Shutdown vides | soit le réutiliser pour P2-04, soit convertir le plugin en content-only; ne pas le laisser vide |
+| `/Game/Systems/Data/QangaDatabaseConnection` | 0 référent Asset Registry | aucune référence source/config texte ; default authored actuel = `TempDB_C` | candidat froid après exclusion d'un override runtime/GameState hors scope ; ne pas créer d'adapter HTTP |
 | plugin `DataManager` complet | GameDataManager 26, DataObject 72, DataManagerLib 52 référents | consommateurs live QModule/gameplay | ne pas supprimer |
 | redirects `DefaultEngine.ini` | preuve Asset Registry insuffisante pour les packages historiques/exclus du dépôt | migrations P0/P1 et Engine encore concernées | aucun redirect candidat prouvé |
+
+Les anciennes lignes qui qualifiaient `UDataManagerBPLibrary` de wrapper mort et le module runtime DataManager de vide sont retirées : la librairie porte maintenant le bridge durable exact utilisé par Offline Tutorial. Cette consommation invalide causalement ces deux candidatures sans modifier le constat historique sur les gros Blueprints DataManager.
 
 Le `ReceiveTick` déconnecté de `BP_Missile` et les events vides des children sont des nettoyages de graphe possibles, pas des assets/plugins à supprimer et pas des gains runtime à compter.
 

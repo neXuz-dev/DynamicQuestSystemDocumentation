@@ -2,15 +2,19 @@
 
 ## Status and scope
 
-This document freezes the Inventory audit baseline and the native contract that must exist before any Blueprint consumer is rewired. The current checkpoint closes the native source boundary without starting a partially wired production adapter:
+This document records the Inventory audit baseline and the native contract required before any Blueprint consumer is rewired. The first live adapter is retained as a cold-buildable source checkpoint; it is not integrated or runtime-validated:
 
 - `QInventory` owns the gameplay item record, semantic validation, versioned codec, endpoint state, strict compare-and-swap reconciliation, one atomic whole-record transfer funnel, and the neutral two-endpoint durability journal.
 - `InventoryComponent_C` remains in production. It is adapted incrementally; it is not rewritten wholesale.
 - `QStorage` remains the persistence mechanism for local containers. It is not the gameplay Inventory authority.
 - `ItemsManagerGS_C` remains a downstream identity/materialization consumer. DataManager now exposes the bounded synchronous durable-row primitive used by the tutorial handoff, but remains a persistence consumer rather than an Inventory mutation owner.
-- `InventoryComponent_C` and its four reliable server RPCs were inspected live; no Inventory Blueprint asset was rewired in this checkpoint.
+- `InventoryComponent_C` and its four reliable server RPCs were inspected live; no Inventory Blueprint asset is claimed rewired by this checkpoint.
 
-The source phase is not integration parity. No existing gameplay caller reaches `QInventory` until the adapter work listed below is completed.
+The source phase is not integration parity. The in-progress adapter does not become a production owner until it is integrated, its competing Blueprint writers are removed in the same bounded slice, and the gates below pass. Until then, no existing gameplay caller is claimed to reach `QInventory`.
+
+Checkpoint boundary: `InventoryComponent_C` still inherits `ActorComponent`; its four transfer RPCs and their callers remain unchanged. `QInventoryIntegration` contains the dormant live adapter, including packed bag/equipment snapshots, lossless legacy payload, rollback, access validation and lifecycle synchronization. It still calls legacy post-commit replication/save; the production paired-journal publisher and startup recovery hook are NOT implemented or wired. The incomplete publisher draft was removed before this checkpoint. Do not reparent Inventory or route gameplay through the adapter before closing that persistence boundary.
+
+The completed DataManager changes are independently active: ordinary TempDB saves and durable writes share one per-world FIFO, and TempDB now uses one managed primary/backup save completion. DataObject synchronous array encoding uses the same delimiter as its decoder and asynchronous encoder.
 
 ## Audited production baseline
 
@@ -30,6 +34,8 @@ The live project index and read-only Blueprint inspection on 2026-08-30 establis
 | `/DataManager/DataManagerLib` | DataManager utility surface | Broad legacy read/write referencer surface |
 
 Exact project-index referencer counts were 126 packages for `InventoryComponent`, 90 for `Obj_ItemInstance`, 82 for `Lib_Inventory`, 20 for `ItemsManagerGS`, 26 for `GameDataManager`, 72 for `DataObject`, 194 for `PersistentDataComponent`, and 52 for `DataManagerLib`. These counts make a wholesale replacement unsafe.
+
+The current live bag lookup is not backed by an independent slot map: `InventoryComponent.GetInventoryIndexByInstance` returns `InventoryItems.Array_Find`. `InventoryItems` is therefore the authoritative packed bag order, while the equipment maps are a separate collection. Native bag `SlotIndex` must equal the item's array position and must be reindexed contiguously after insertion or removal; it must not be inferred from an equipment map or treated as a stable sparse slot.
 
 ### Current identity and payload
 
@@ -96,7 +102,7 @@ Recent history is part of the contract. Commit `14d000eb2` fixed persistent item
 
 ### Chosen owner
 
-The owner is a new runtime plugin, `Plugins/QInventory`, with no dependency on UI, QModule, DynamicQuestSystem, QStorage, DataManager, QBuilder, or Blueprint presentation modules. Its public data types are transportable by adapters, but the core does not use reflection.
+The data owner is the runtime `QInventory` module, with no dependency on UI, QModule, DynamicQuestSystem, QStorage, DataManager, QBuilder, or Blueprint presentation modules. The separate `QInventoryIntegration` module in the same plugin owns the live Unreal/DataManager/interaction bridge. Public core data types are transportable by adapters, but the core does not use reflection.
 
 Dependency direction after integration is one-way:
 
@@ -116,19 +122,21 @@ Blueprint / QModule / DQS / trade / loot adapters
 
 ### Versioned item record
 
-Schema v1 carries:
+Schema v2 carries:
 
 - `RecordVersion`;
 - stable `FGuid Identity`;
+- exact legacy `DataObjectId`, separate from the native GUID;
 - explicit `Persistent` or `Transient` item mode;
 - stable `FName ItemDataKey`;
 - positive `Stack`;
 - byte-range `Rarity` represented as `int32` at the API boundary;
-- non-empty `OwnerId`;
-- inventory `SlotIndex` plus an optional stable equipment-slot key;
+- `OwnerId`, required for persistent records; a transient owner may legitimately be `None`;
+- packed bag array `SlotIndex` plus an optional stable equipment-slot key;
 - complete attachment records, each with its own stable identity, ItemData key, stack, rarity, owner, mount key, customization, extension payload, and validity;
 - `CustomizationId` plus sorted key/value customization data;
 - sorted key/value extension data for lossless fields not yet promoted to typed members;
+- sorted opaque DataObject rows for fields not owned by native records; ownership is by exact `(type, key)` tuple, so independent typed fields with the same name are preserved;
 - explicit `bValid`.
 
 The root record and every embedded attachment are semantically validated. No field is populated by a partial reflected struct write.
@@ -143,7 +151,7 @@ Each endpoint carries:
 - monotonic `ContentVersion` used for optimistic concurrency;
 - monotonic `PersistenceGeneration` used for ordered durable writes;
 - fail-closed `bReadOnly` state;
-- unique root item identities, unique attachment identities across the endpoint, and unique occupied root slots.
+- unique root item identities, unique attachment identities across the endpoint, contiguous packed bag indices, and unique equipment-slot keys.
 
 Transient means "not written across process lifetime"; it does not mean "identity may be unstable". Both modes require GUID identity while alive.
 
@@ -151,16 +159,16 @@ Transient means "not written across process lifetime"; it does not mean "identit
 
 The validator rejects the complete state when any invariant fails:
 
-1. schema versions are exactly supported v1;
+1. schema and record versions are exactly supported v2;
 2. inventory, root item, and attachment GUIDs are valid;
-3. ItemData keys and owners are not `None`;
+3. ItemData keys and DataObject IDs are not `None`; persistent owners are not `None`;
 4. stacks are positive and rarity is in `[0, 255]`;
-5. bag records have an empty equipment key and a unique slot in `[0, Capacity)`; equipped records have a non-empty unique equipment key and `SlotIndex == -1`;
+5. bag records have an empty equipment key and exactly fill the contiguous range `[0, BagRecordCount)` with one record per index; equipped records live in the separate equipment maps, have a non-empty unique equipment key and `SlotIndex == -1`;
 6. attachment mount keys are non-empty;
 7. no root or attachment identity appears twice, and an item cannot attach itself;
 8. customization and extension keys are non-empty and remain within codec limits;
-9. capacity, content version, and persistence generation are valid and incrementable;
-10. bag record count does not exceed bag capacity; equipped records do not consume bag slots, while all root records remain bounded by the schema-v1 maximum of `4096`;
+9. gameplay bag capacity is in `[1, 100000]`, while content version and persistence generation are valid and incrementable;
+10. bag record count does not exceed bag capacity; equipped records do not consume bag capacity, while the complete root-record set remains bounded by the distinct serialization/allocation limit of `4096`;
 11. `bValid` is true for every accepted item and attachment.
 
 Malformed or semantically invalid decoded data is never partially installed. The caller retains the last valid snapshot and marks the affected persistence segment/endpoint read-only. Mutation then returns an explicit read-only result.
@@ -169,7 +177,7 @@ Malformed or semantically invalid decoded data is never partially installed. The
 
 ### Request and authority
 
-The first vertical moves a whole root record. The request contains a transaction GUID, item GUID, full-stack quantity, optional target slot, and expected versions for both endpoints. Partial stack transfer is explicitly unsupported in v1 because splitting while preserving one identity would violate uniqueness.
+The first vertical moves a whole root record. The request contains a transaction GUID, item GUID, full-stack quantity, optional target slot, and expected versions for both endpoints. Partial stack transfer is explicitly unsupported by this funnel because splitting while preserving one identity would violate uniqueness.
 
 An authority context is created by the server adapter and must prove all of:
 
@@ -194,10 +202,10 @@ The two locks cover validation, expected-version checks, snapshots, mutation, po
 4. Compare both expected `ContentVersion` values.
 5. Resolve the source identity exactly once and reject duplicates/missing identity.
 6. Require the requested quantity to equal the complete source stack.
-7. Reserve an explicit valid empty target slot, or the lowest free slot when auto-slot is requested. No stack merge and no overflow drop occurs in this vertical.
+7. Resolve a packed target insertion index in `[0, TargetBagCount]`; auto-slot appends at `TargetBagCount`, and an explicit index inserts there. Reject a full target or any request outside the packed range. No sparse hole, stack merge, or overflow drop occurs in this vertical.
 8. Copy complete source and target rollback snapshots, then let the typed mutation backend capture any external adapter state.
 9. Remove exactly the source record through the mutation backend and verify the removed record is byte-semantic equivalent to the expected record.
-10. Apply only the controlled transfer changes: root slot becomes the reserved target slot, the prior equipment-slot assignment is cleared, root/attachment owner becomes the target endpoint owner, and root/attachment persistence mode becomes the target endpoint mode. Identity, ItemData key, stack, rarity, attachment payload, customization, validity, and extensions remain unchanged.
+10. Apply only the controlled transfer changes: removing a bag record shifts later source indices down, inserting it shifts target indices at or above the insertion point up, the moved root receives the resolved packed index, the prior equipment-slot assignment is cleared, and root/attachment owner and persistence mode become those of the target endpoint. Identity, ItemData key, stack, rarity, attachment payload, customization, validity, and extensions remain unchanged.
 11. Add exactly that record to the target.
 12. Build the only permitted post-mutation states (`source snapshot - moved record` and `target snapshot + transferred record`) and require semantic equality with both live endpoints. Also verify source absence, target uniqueness/exact payload, expected counts, and complete semantic validity. Any unrelated record or endpoint change fails the transaction.
 13. Increment both content versions and both persistence generations once; validate again.
@@ -208,7 +216,17 @@ Any remove failure, add failure, or failed postcondition restores both full endp
 
 ## Codec and persistence adapter contract
 
-`QInventory` schema v1 uses a bounded deterministic binary codec with a magic tag and explicit versions. Strings are length-prefixed UTF-8 with hard limits. Record counts, attachments, maps, and total payload bytes are bounded before allocation. Map keys are encoded in lexical order so identical states produce identical payloads. Decode succeeds only when the entire buffer is consumed and semantic validation passes. Output is assigned only on success.
+`QInventory` schema v2 uses a bounded deterministic binary codec with a magic tag and explicit versions. Strings are length-prefixed UTF-8 with hard limits. Record counts, attachments, maps, and total payload bytes are bounded before allocation. Map keys and opaque typed rows are encoded in canonical order so identical states produce identical payloads. Decode succeeds only when the entire buffer is consumed and semantic validation passes. Output is assigned only on success. The neutral journal is also versioned at v2 and can retain bounded backend recovery payloads; that is groundwork, not a production recovery adapter.
+
+### QBuilder is a resource ledger, not a whole-item endpoint
+
+`QBuilder_Builder_Actor_BP.InventoryComponent` is rebuilt from `Builder_Advanced_Resource` when interacting with a build zone. Its projected items are destroyed and regenerated; their identities are not durable ledger identities. The native adapter explicitly excludes builder-owned components while the existing builder Blueprint route remains intact.
+
+The ledger is persisted by QBuilder's separate world-specific `*_Build_0..3.sav` family. The manager's external autosave delegate ultimately calls the native QBuilder file writer, not TempDB. Runtime builder numeric IDs are reassigned when loading; the existing QStorage projection ID must not be assumed to identify a ledger recovery participant.
+
+A future typed builder transaction must consume a real inventory record for deposit, or create a new real inventory record for withdrawal, while atomically changing the resource ledger. Mapping, exact quantity, access, versions, overflow, rollback and paired durability belong inside that boundary; quest events and projection refresh are post-commit consumers. Do not persist a synthetic Inventory endpoint for the ledger or call builder add/remove delegates after a generic whole-item commit. Remove the superseded projection persistence and the dead `RequestBuilderUpdate -> SendUpdatedResourcesToQBuilder` chain only when that replacement is working.
+
+### Backend publication contract
 
 The QStorage/DataManager adapter is a later integration owner and must obey these rules:
 
@@ -226,7 +244,9 @@ The QStorage/DataManager adapter is a later integration owner and must obey thes
 
 The QStorage integration source now adds complete `FQInventoryCodec` endpoint records, exact GUID/actor/adapter registration, expected content versions, persistence generations, ordered async ownership, shutdown draining and a neutral journal interface. It preserves the legacy crate path independently instead of projecting native records through `FQST_ItemStack`. Every queued endpoint generation, including generation zero, keeps its exact segment revision and serialized state until completion. Completion callbacks are resolved from detached records rather than while iterating their owning maps. Missing `Contents` for a live record freezes the whole segment read-only instead of writing an empty destructive replacement. Synchronous drain propagates failures, isolates failed segments, continues every ordered generation on healthy segments, and shutdown explicitly abandons prepares that never entered the writer. The neutral two-endpoint coordinator is implemented by `FQInventoryDurabilityCoordinator`; no production Inventory adapter calls it yet.
 
-DataManager now owns one native, game-thread-only durable row bridge for the existing TempDB save object. It validates the exact backend/context identity, bounds record and line counts plus aggregate text before allocation, distinguishes found/not-found/error reads, captures the exact in-memory rows, writes and synchronously flushes the save slot, reloads through the low-level save-game system, and accepts only an order-independent exact encoded-row readback. Any failure restores and verifies the original rows. The Offline Tutorial subsystem consumes this primitive and its duplicate reflection/save/readback implementation has been removed. Online or non-TempDB contexts are rejected explicitly; this bridge is not a second Inventory owner.
+DataManager now owns one native, game-thread-only durable row bridge for the existing TempDB save object. It validates the exact backend/context identity, bounds record and line counts plus aggregate text before allocation, distinguishes found/not-found/error reads, captures the exact in-memory rows, writes and synchronously flushes the save slot, reloads through the low-level save-game system, and accepts only an order-independent exact encoded-row readback. Any failure restores and verifies the original rows. The Offline Tutorial subsystem consumes this primitive and its duplicate reflection/save/readback implementation has been removed. Despite the legacy name `ResolveOfflineTempDbContext`, the resolver does not inspect net mode: its backend gate requires `TempDB_C` in the connection class hierarchy, and every other connection is rejected. This bridge is not a second Inventory owner.
+
+The live authored default is coherent with that gate: `QangaGameState.GameDataManager.DataBaseConnection` is `TempDB_C`, and `BaseGameMode`, `Lobby_GM`, `Survival_GM`, `Deathmatch_GM`, and `Tutorial_GM` all author `QangaGameState_C` as their exact `GameStateClass`. The scoped six-asset Blueprint search found no `DataBaseConnection` graph override. The old HTTP `QangaDatabaseConnection` Blueprint has zero Asset Registry referencers and no text configuration reference, so no new HTTP Inventory adapter is required. Runtime mutation, an uninspected mode, or a separately selected GameState can still change the connection; those remain integration gates rather than a reason to add a second backend path.
 
 ## Staged Blueprint and consumer cleanup
 
@@ -238,11 +258,11 @@ DataManager now owns one native, game-thread-only durable row bridge for the exi
 ### P1: first live transfer adapter
 
 - Add one native adapter that materializes a complete `InventoryComponent_C` snapshot into a `QInventory` endpoint and applies a committed result through one verified write path.
-- Read root slots from the authoritative legacy slot maps, not inventory-array position. Missing/duplicate mappings fail validation.
-- Perform the one-time persistent GUID write before admitting legacy records, and move the same `Obj_ItemInstance_C` plus attachment objects between legacy owners without destruction/recreation.
+- Read bag order from the authoritative `InventoryItems` array (`GetInventoryIndexByInstance` is `Array_Find`) and mirror its packed indices exactly. Treat equipment maps as a separate collection; any bag hole, duplicate index, or array/record mismatch fails validation.
+- Plan GUID admission without side effects after complete transfer feasibility, durably prepare the paired journal before applying that plan, and move the same `Obj_ItemInstance_C` plus attachment objects between legacy owners without destruction/recreation.
 - Replace `Lib_Inventory.TryMoveItemToAnotherInventory` internals with a typed server call; keep the Blueprint function only as a compatibility shell until every caller consumes the typed result.
 - Resolve source/target server-side, carry both expected versions, and reject stale client requests.
-- Rewire the four `SV_*` paths. QBuilder deposit begin/end must consume committed quantity only and must end/cancel on every failure.
+- Rewire the generic `SV_*` paths only after paired persistence and startup recovery are complete. Keep QBuilder on its legacy route until a dedicated typed ledger transaction replaces it; its projected inventory must never become a generic endpoint.
 - Remove the old remove/recreate-by-ID path once the native path is live. Do not leave it disabled or commented.
 
 ### P1 mutation convergence
@@ -258,16 +278,23 @@ DataManager now owns one native, game-thread-only durable row bridge for the exi
 
 - `ItemsManagerGS`: become a materialization/cache consumer keyed by native GUID, not the mutation authority. Remove timestamp identity generation only after all saved legacy names have a one-time, explicit migration policy; never synthesize GUIDs from ordinal position.
 - DataManager: become a legacy persistence adapter for player inventories until QStorage/native persistence owns that domain. Map complete records, preserve generations, and fail closed on malformed values.
-- The first DataManager P2 vertical is one versioned world-drop round trip through `DataManagerItemRecordCodec`; it must not become a bulk rewrite or an alternate Inventory mutation owner.
+- The first DataManager P2 vertical is one versioned world-drop round trip using a complete payload encoded by the existing `FQInventoryCodec` and persisted through the exact durable-row bridge; it must not add a parallel item codec, become a bulk rewrite, or create an alternate Inventory mutation owner.
 - Retire obsolete global maps, DataObject keys, Blueprint save/replication branches, and compatibility helpers immediately after their last consumer moves.
 
 ## Verification gates for integration owner
 
-The central integration retains direct QATS dependencies on `QInventory`, `QStorage`, and DataManager. On 2026-09-01 the cold-built Editor executed `35/35` `QATS.QInventory.*`, `11/11` `QATS.QStorage.*`, `4/4` `QATS.DataManager.*`, and `5/5` `QATS.Quest.OfflineTutorial*` with zero failure. This validates the isolated record, bag/equipment separation, strict endpoint reconciliation, codec, locking, transaction and rollback core, synchronous re-entrant reads, durable journal coordinator, exact endpoint generations, fail-closed incomplete snapshots, ordered drain, shutdown failure propagation, bounded TempDB durable write/readback/rollback, and the tutorial consumer contract. It does not validate crash interruption during physical file rotation, a production Inventory adapter, network parity, or process-restart recovery; those gates remain open.
+The central integration retains direct QATS dependencies on `QInventory`, `QStorage`, and DataManager. On 2026-09-01 the cold-built Editor executed `35/35` `QATS.QInventory.*`, `11/11` `QATS.QStorage.*`, `4/4` `QATS.DataManager.*`, and `5/5` `QATS.Quest.OfflineTutorial*` with zero failure. On 2026-09-07 the updated native code compiled through Live Coding and executed `36/36` `QATS.QInventory.*`, including `Transfer.PackedBagReindex`, plus `11/11` `QATS.QStorage.*`, with zero error or warning. The newer run validates packed bag removal/insertion reindexing in addition to the previously covered isolated record, bag/equipment separation, strict endpoint reconciliation, codec, locking, transaction and rollback core, synchronous re-entrant reads, durable journal coordinator, exact endpoint generations, fail-closed incomplete snapshots, ordered drain and shutdown failure propagation. DataManager and Offline Tutorial were not rerun in that newer gate; their `4/4` and `5/5` evidence remains the earlier cold-build result. None of these QATS validates crash interruption during physical file rotation, a production Inventory adapter, network parity, power-loss durability, or process-restart recovery; those gates remain open.
+
+### Checkpoint verification — 2026-09-08
+
+The cold `QangaEditor` build succeeded. A subsequent successful Live Coding patch applied the final DataManager worker-only wait and updated journal-v2 assertions. Final suites pass `36/36` QInventory, `11/11` QStorage and `7/7` DataManager with zero warnings; the async/durable FIFO regression passes twenty consecutive repetitions. The final wait uses a shared `FEventRef`, because `TTask::GetResult()` can retract work directly onto its Game Thread caller despite `DoNotRunInsideBusyWait`. The existing pipe still owns all storage execution and ordering.
+
+TempDB and DataObject compile with zero errors/warnings. A transient two-attachment DataObject fixture verifies blocking encode/decode preserves both entries. The Inventory Blueprint remains parented to ActorComponent and the integration adapter remains dormant. No production journal owner or recovery bootstrap is installed. No PIE, multiplayer, packaged, physical-crash or power-loss result is claimed. The old Offline Tutorial `5/5` result above was not refreshed in this checkpoint.
 
 ### Hard QATS
 
 - successful whole-record transfer preserves identity and complete payload;
+- packed bag removal closes the source gap and insertion shifts the target range while equipment records remain outside bag indexing;
 - target full and occupied target slot leave both endpoints unchanged;
 - stale source and stale target versions fail independently;
 - identical endpoint object and equal endpoint GUID fail before lock acquisition;
